@@ -242,3 +242,479 @@ This creates a `wordpress` directory with the chart's files, including `values.y
 
 ---
 
+# Helm Templating Basics
+
+Helm uses Go templates to dynamically generate Kubernetes manifests. Key variables like `Release` and `Chart` provide metadata for customization. Here's how to use them:
+
+---
+
+## Dynamic Naming Example
+```yaml
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ .Release.Name }}-nginx  # Uses release name in resource name
+spec:
+  replicas: 2
+  template:
+    metadata:
+      labels:
+        # Chart name and version in labels
+        app: {{ .Chart.Name }}
+        version: {{ .Chart.Version }}
+```
+
+---
+
+## Release Object Properties
+| Variable                | Description                                                                 | Example Usage                                    |
+|-------------------------|-----------------------------------------------------------------------------|--------------------------------------------------|
+| `{{ .Release.Name }}`    | Name given during `helm install`                                            | Resource names, labels                           |
+| `{{ .Release.Namespace }}` | Target namespace for the release                                            | `namespace: {{ .Release.Namespace }}`            |
+| `{{ .Release.IsUpgrade }}` | Boolean (`true` if this is an upgrade operation)                            | Conditional logic in templates                   |
+| `{{ .Release.IsInstall }}` | Boolean (`true` if this is a fresh install)                                 | Initialization blocks                            |
+| `{{ .Release.Revision }}` | Release version number (increments with upgrades)                           | Annotations, rollback tracking                   |
+| `{{ .Release.Service }}` | Always set to `"Helm"` (legacy field)                                       | Rarely used                                      |
+
+---
+
+## Chart Object Properties
+| Variable                | Description                                                                 | Example Usage                                    |
+|-------------------------|-----------------------------------------------------------------------------|--------------------------------------------------|
+| `{{ .Chart.Name }}`      | Name from `Chart.yaml`                                                      | Labels, annotations                              |
+| `{{ .Chart.ApiVersion }}`| Chart API version (e.g., `v2`)                                              | Compatibility checks                             |
+| `{{ .Chart.Version }}`   | Chart version from `Chart.yaml`                                             | Version tags, rollback tracking                  |
+| `{{ .Chart.Type }}`      | Chart type (usually `application` or `library`)                             | Conditional logic                                |
+| `{{ .Chart.Keywords }}`  | List of keywords from `Chart.yaml`                                          | Metadata displays                                |
+| `{{ .Chart.Home }}`      | URL to project homepage from `Chart.yaml`                                   | Documentation links                              |
+
+---
+
+### Practical Examples
+
+1. **Namespace Declaration**
+```yaml
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ .Release.Name }}-svc
+  namespace: {{ .Release.Namespace }}  # Inherits install namespace
+```
+
+2. **Conditional Logic**
+```yaml
+{{- if .Release.IsUpgrade }}
+  strategy:
+    type: RollingUpdate  # Only apply during upgrades
+{{- end }}
+```
+
+3. **Chart Metadata in Labels**
+```yaml
+metadata:
+  labels:
+    chart: {{ .Chart.Name }}-{{ .Chart.Version | replace "+" "_" }}
+    heritage: {{ .Release.Service }}
+```
+
+---
+
+**Best Practices**
+- Always use `{{ .Release.Name }}` prefix for resources to avoid naming conflicts
+- Include `{{ .Chart.Name }}` and `{{ .Chart.Version }}` in labels for traceability
+- Use `{{ .Release.Namespace }}` instead of hardcoding namespaces
+
+> 💡 **Tip**: Run `helm template [CHART]` to see rendered manifests without installing!
+
+
+---
+
+# Validating Helm Charts: Linting, Templating, and Dry Runs
+
+Use these commands to validate charts before deployment:
+
+---
+
+## 1. Linting (`helm lint`)
+Checks for chart structure and YAML syntax errors.
+
+**Example:**
+```bash
+# Lint a local chart
+helm lint ./mychart
+
+# Lint a remote chart (after adding repo)
+helm lint bitnami/wordpress
+```
+
+**Output (Success):**
+```
+==> Linting ./mychart
+[INFO] Chart.yaml: icon is recommended
+
+1 chart(s) linted, 0 chart(s) failed
+```
+
+**Output (Error):**
+```
+Error: unable to build kubernetes objects from release manifest: error validating "": error validating data: ValidationError(Deployment.spec): missing required field "selector" in io.k8s.api.apps.v1.DeploymentSpec
+```
+
+---
+
+## 2. Template Rendering (`helm template`)
+Generates final Kubernetes manifests for inspection.
+
+**Example:**
+```bash
+helm template  ./mychart --debug
+
+
+# Render templates with release name
+helm template my-release ./mychart
+
+# Save output to file
+helm template my-release bitnami/wordpress -f values.yaml > manifests.yaml
+```
+
+**Partial Output:**
+```yaml
+# Source: mychart/templates/deployment.yaml
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: my-release-nginx
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app: hello-world
+```
+
+---
+
+## 3. Dry Run (`helm install --dry-run`)
+Simulates installation with server-side validation.
+
+**Example:**
+```bash
+helm install my-release bitnami/wordpress \
+  --namespace staging \
+  -f custom-values.yaml \
+  --dry-run \
+  --debug
+```
+
+**Output Shows:**
+```
+NAME: my-release
+LAST DEPLOYED: Wed Aug 30 14:23:18 2023
+NAMESPACE: staging
+STATUS: pending-install
+REVISION: 1
+TEST SUITE: None
+HOOKS:
+MANIFEST:
+--- 
+# Rendered manifests appear here
+```
+
+---
+
+## Key Differences
+
+| Command                | Checks                   | Cluster Access Needed? | Server Validation? |
+|------------------------|--------------------------|------------------------|--------------------|
+| `helm lint`            | Chart structure/YAML     | ❌ No                  | ❌ No              |
+| `helm template`        | Template rendering       | ❌ No                  | ❌ No              |
+| `helm install --dry-run`| Full validation         | ✅ Yes                 | ✅ Yes             |
+
+---
+
+## Best Practice Workflow
+1. **Lint** your chart first
+2. **Template** to verify rendering
+3. **Dry-run** with actual cluster context
+4. Finally deploy with confidence!
+
+**Example Sequence:**
+```bash
+helm lint ./mychart
+helm template test ./mychart -f values.yaml
+helm install test ./mychart -f values.yaml --dry-run --debug
+helm install test ./mychart -f values.yaml
+```
+
+--- 
+
+**Pro Tip:** Combine with `kubeval` for additional Kubernetes schema validation:
+```bash
+helm template my-release ./mychart | kubeval --strict
+```
+
+
+---
+
+# Helm Templating: Functions, Pipelines, and Conditions
+
+## 1. Functions
+Helm provides built-in functions (based on Go templates) to manipulate values in charts. 
+
+### `default` Function Example
+**Purpose**: Set a default value if a variable is empty/missing.  
+**Syntax**: `{{ VALUE | default DEFAULT }}`  
+
+**Example**:
+```yaml
+image: {{ .Values.image.tag | default "latest" }}
+```
+- If `.Values.image.tag` is not defined, uses `"latest"`  
+- Equivalent to: `{{ default "latest" .Values.image.tag }}`
+
+---
+
+## 2. Pipelines
+Chain multiple functions using the `|` operator. Execution order is **left-to-right**.
+
+### Example: Uppercase & Quote
+```yaml
+metadata:
+  name: {{ .Release.Name | upper | quote }}
+```
+1. `upper`: Converts release name to uppercase  
+2. `quote`: Wraps result in quotes (for safe YAML strings)  
+
+**Result**:
+```yaml
+name: "MY-RELEASE"  # If release name was "my-release"
+```
+
+---
+
+## 3. Conditions
+### Example with `if`/`else if`/`end`
+```yaml
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ .Release.Name }}-nginx
+  {{- if .Values.orgLabel }}  # Check if orgLabel exists and is non-empty
+  labels:
+    org: {{ .Values.orgLabel }}
+  {{- else if eq .Values.orgLabel "hr" }}  # ❗ Logical issue (see note below)
+  labels:
+    org: human resources
+  {{- end }}
+```
+
+### Common Condition Functions
+| Function  | Purpose                          | Example                          |
+|-----------|----------------------------------|----------------------------------|
+| `eq`      | Equal to                         | `{{ eq .Values.env "prod" }}`    |
+| `ne`      | Not equal to                     | `{{ ne 5 3 }}` → true            |
+| `lt`      | Less than                        | `{{ lt .Values.replicas 5 }}`    |
+| `le`      | Less than or equal               | `{{ le 5 5 }}` → true            |
+| `gt`      | Greater than                     | `{{ gt 10 5 }}` → true           |
+| `ge`      | Greater than or equal            | `{{ ge 5 5 }}` → true            |
+| `not`     | Logical negation                 | `{{ not .Values.enabled }}`      |
+| `empty`   | Check if value is empty/nil      | `{{ empty .Values.labels }}`     |
+
+---
+
+### Key Notes
+1. **Whitespace Control**:
+   - `{{-` trims preceding whitespace  
+   - `-}}` trims trailing whitespace  
+
+2. **Condition Example Issue**:
+   ```yaml
+   {{- if .Values.orgLabel }}  # Checks if orgLabel exists
+   {{- else if eq .Values.orgLabel "hr" }}  # ❗ Never reached
+   ```
+   - If `orgLabel` is `"hr"`, the first condition (`if`) is already true  
+   - Fix: Use nested conditions or a different variable
+
+**Corrected Example**:
+```yaml
+{{- if eq .Values.orgLabel "hr" }}
+  labels:
+    org: human resources
+{{- else if .Values.orgLabel }}
+  labels:
+    org: {{ .Values.orgLabel }}
+{{- end }}
+```
+
+---
+
+## Reference
+- [Helm Function List](https://helm.sh/docs/chart_template_guide/function_list/#string-functions)  
+- Always test conditions with `helm template --debug` before deployment!
+
+---
+
+
+# Helm `with` Blocks and Scoping
+
+## `with` Blocks
+Changes the current scope (`.` context) to a specified object. Useful for simplifying nested values.
+
+**Example**:
+```yaml
+{{- with .Values.nginx }}
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ $.Release.Name }}-svc  # Uses $ to access root scope
+spec:
+  ports:
+    - port: {{ .port }}  # Equivalent to .Values.nginx.port
+{{- end }}
+```
+
+## Key Points:
+1. **Scope Limitation**:
+   - Inside `with`, `.` refers to the specified object (e.g., `.Values.nginx`)
+   - Can't directly access parent objects like `.Release.Name` without `$`
+
+2. **Root Access with `$`**:
+   - Use `$` to access root scope anywhere:
+   ```yaml
+   {{- with .Values.service }}
+   image: {{ .image }}:{{ $.Chart.Version }}  # Mixes local and root scopes
+   {{- end }}
+   ```
+
+3. **Practical Use Case**:
+```yaml
+{{- with .Values.resources }}
+resources:
+  limits:
+    cpu: {{ .cpuLimit }}
+    memory: {{ .memoryLimit }}
+  requests:
+    cpu: {{ .cpuRequest }}
+    memory: {{ .memoryRequest }}
+{{- else }}  # Fallback if resources not defined
+resources: {}
+{{- end }}
+```
+
+## ⚠️ Important:
+- Always check if the object exists first to prevent errors:
+```yaml
+{{- if .Values.nginx }}
+{{- with .Values.nginx }}
+# ... template code ...
+{{- end }}
+{{- end }}
+
+---
+
+
+# Helm Ranges with Example
+
+**Purpose**: Iterate over lists/maps in templates.
+
+## Example
+**Template** (`configmap.yaml`):
+```yaml
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ .Release.Name }}-regioninfo
+data:
+  regions:
+  {{- range .Values.regions }}
+    - {{ . }}  # "." represents current list item
+  {{- end }}
+```
+
+**values.yaml**:
+```yaml
+regions:
+  - Ohio
+  - NewYork
+  - Ontario
+  - London
+  - Singapore
+  - Mumbai
+```
+
+## Generated Output:
+```yaml
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: myrelease-regioninfo
+data:
+  regions:
+    - Ohio
+    - NewYork
+    - Ontario
+    - London
+    - Singapore
+    - Mumbai
+```
+
+## Key Notes:
+1. `range` iterates over list items
+2. `.` inside range = current item
+3. Hyphen `-` with indentation creates YAML list
+4. Use `{{-` to trim whitespace around directives
+
+⚠️ **Fix Needed**: Your original values.yaml needs consistent hyphen formatting for list items.
+
+---
+
+
+# Helm Helper Templates
+
+**Purpose**: Reuse template code across charts.
+
+## Example
+1. Define template in `_helpers.tpl`:
+```tpl
+{{- define "labels" }}
+    app.kubernetes.io/name: {{ .Release.Name }}
+    app.kubernetes.io/instance: {{ .Release.Name }}
+{{- end }}
+```
+
+2. Use in `deployment.yaml`:
+```yaml
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ .Release.Name }}-nginx
+  labels:
+    {{- template "labels" . }}  # Simple inclusion
+spec:
+  selector:
+    matchLabels:
+      {{- include "labels" . | indent 2 }}  # With indentation to keep the anotation in correct format
+  template:
+    metadata:
+      labels:
+        {{- include "labels" . | indent 4 }}  # Deeper indent to keep the anotation in correct format
+    spec:
+      containers:
+      - name: nginx
+        image: "nginx:1.16.0"
+```
+
+## Key Points:
+- `define` creates reusable template blocks
+- `template` directly inserts content
+- `include` allows piping to functions like `indent`
+- Dot (`.`) passes current context to access variables
+- Helper templates live in `_helpers.tpl` by convention
+
+**Resulting Labels**:
+```yaml
+labels:
+  app.kubernetes.io/name: myrelease
+  app.kubernetes.io/instance: myrelease
+```
+
+> 💡 **Tip**: Use helpers for shared labels, annotations, and other repetitive configurations!
