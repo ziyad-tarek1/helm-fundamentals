@@ -718,3 +718,83 @@ labels:
 ```
 
 > 💡 **Tip**: Use helpers for shared labels, annotations, and other repetitive configurations!
+
+---
+
+
+# Helm Hooks with Examples
+
+## Hook Types & Annotations
+| Hook Type          | Annotation                      |
+|---------------------|---------------------------------|
+| pre-install        | `helm.sh/hook: pre-install`     |
+| post-install       | `helm.sh/hook: post-install`    |
+| pre-upgrade        | `helm.sh/hook: pre-upgrade`     |
+| post-upgrade       | `helm.sh/hook: post-upgrade`    |
+| pre-delete         | `helm.sh/hook: pre-delete`      |
+| post-delete        | `helm.sh/hook: post-delete`     |
+| pre-rollback       | `helm.sh/hook: pre-rollback`    |
+| post-rollback      | `helm.sh/hook: post-rollback`   |
+
+---
+
+## Example 1: Pre-Install Job (Database Migration)
+```yaml
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: pre-install-db-migrate
+  annotations:
+    helm.sh/hook: pre-install
+    helm.sh/hook-weight: "0"  # Lowest weight runs first
+    helm.sh/hook-delete-policy: hook-succeeded
+spec:
+  template:
+    spec:
+      containers:
+      - name: migrator
+        image: myapp-db-migrate:1.0
+        command: ["sh", "-c", "rails db:migrate"]
+      restartPolicy: Never
+```
+
+## Example 2: Post-Upgrade Job (Cleanup)
+```yaml
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: post-upgrade-cleanup
+  annotations:
+    helm.sh/hook: post-upgrade
+    helm.sh/hook-weight: "1"  # Higher weight = later execution
+    helm.sh/hook-delete-policy: before-hook-creation
+spec:
+  template:
+    spec:
+      containers:
+      - name: cleaner
+        image: busybox
+        command: ["sh", "-c", "rm -rf /tmp/old-cache"]
+      restartPolicy: OnFailure
+```
+
+---
+
+## Hook Delete Policies
+| Policy                | Behavior                                 |
+|-----------------------|------------------------------------------|
+| `hook-succeeded`      | Delete after hook succeeds              |
+| `hook-failed`         | Delete after hook fails                 |
+| `before-hook-creation`| Delete previous hooks before new create |
+
+**Combine policies**:  
+`helm.sh/hook-delete-policy: hook-succeeded,hook-failed`
+
+---
+
+**Key Notes**:
+- Use `hook-weight` (string!) to control execution order (-100 to 100)
+- Hooks execute in ascending weight order (lower first)
+- Default weight is "0" if not specified
+
+---
